@@ -1,0 +1,203 @@
+import { useFormik, FormikConfig, FormikValues } from 'formik';
+import React, { FC, memo, useEffect, useState } from 'react';
+import { NavigateFunction } from 'react-router-dom';
+import * as yup from 'yup';
+import Button from 'UIComponents/Button';
+import EmailField from 'UIComponents/EmailField';
+import PasswordField from 'UIComponents/PasswordField';
+import { useAppDispatch } from 'Hooks/defaultHooks';
+import routes from '../../../routes';
+import { logIn } from 'Store/slices/authSlice';
+import { errorHandler } from 'Utils/errorHandler';
+import { isFetchBaseQueryError } from 'Utils/errorsHelper';
+import { successHandler } from 'Utils/successHandler';
+import { useSignInMutation } from '../authorization.service';
+import { SignInInitialValues } from '../authorization.types';
+import cls from './SignInForm.module.scss';
+import { useSendMagicLinkMutation } from '../../oauth/oauth.service';
+
+interface FormikContext extends FormikValues {
+  showPasswordField: boolean;
+}
+interface FormContext {
+  showPasswordField: boolean;
+}
+type SignInFormProps = {
+  navigate: NavigateFunction;
+  setError: React.Dispatch<React.SetStateAction<string>>;
+  setInitialState: React.Dispatch<
+    React.SetStateAction<{
+      email: string;
+      password: string;
+      code2FA: string;
+    }>
+  >;
+  setShowTwoFactorForm: React.Dispatch<React.SetStateAction<boolean>>;
+  showPasswordField?: boolean;
+};
+
+const SignInForm: FC<SignInFormProps> = memo(
+  ({ navigate, setError, setInitialState, setShowTwoFactorForm, showPasswordField = true }) => {
+    const [disabled, setDisabled] = useState<boolean>(false);
+    const [showPassword, setShowPassword] = useState<boolean>(false);
+    const [signIn] = useSignInMutation();
+    const dispatch = useAppDispatch();
+    const [isMagicLinkSent, setIsMagicLinkSent] = useState<boolean>(false);
+    const [sendMagicLink] = useSendMagicLinkMutation();
+
+    const getValidationSchema = (showPassword: boolean) => {
+      return yup.object().shape({
+        email: yup
+          .string()
+          .email('Введен некорректный email')
+          .required('Поле является обязательным')
+          .trim(),
+        password: showPassword
+          ? yup
+              .string()
+              .min(8, 'Не менее 8 символов')
+              .max(30, 'Не больше 30 символов')
+              .required('Поле является обязательным')
+              .trim()
+          : yup.string().notRequired().trim(),
+      });
+    };
+    const [validationSchema, setValidationSchema] = useState(
+      getValidationSchema(showPasswordField),
+    );
+    useEffect(() => {
+      setValidationSchema(getValidationSchema(showPasswordField));
+    }, [showPasswordField]);
+
+    const formik = useFormik({
+      initialValues: {
+        email: '',
+        password: '',
+      },
+      validationSchema,
+      validateOnChange: false,
+      context: { showPasswordField },
+      onSubmit: async (values) => {
+        const { email, password } = values;
+        try {
+          if (showPasswordField) {
+            const response = await signIn({ email, password }).unwrap();
+            if (response.consumerId) {
+              dispatch(logIn(response));
+              setDisabled(true);
+              successHandler('Вы успешно вошли в личный кабинет');
+              navigate(routes.pages.mainPage());
+            } else {
+              setInitialState({ email, password, code2FA: '' });
+              setShowTwoFactorForm(true);
+            }
+          } else {
+            setDisabled(true);
+            await sendMagicLink({ email }).unwrap();
+            setIsMagicLinkSent(true);
+            successHandler('Магическая ссылка отправлена на вашу почту');
+          }
+        } catch (error) {
+          setDisabled(false);
+          setIsMagicLinkSent(false);
+          if (isFetchBaseQueryError(error)) {
+            switch (error.status) {
+              case 400:
+                errorHandler('Не правильный запрос');
+                break;
+              case 401:
+                errorHandler(
+                  showPasswordField
+                    ? 'Неверные логин или пароль'
+                    : 'Неверный email или пользователь не найден',
+                );
+                break;
+              case 403:
+                errorHandler('Запрещено');
+                break;
+              case 404:
+                errorHandler('Пользователь с такими данными не найден');
+                break;
+              case 406:
+                formik.setErrors({
+                  password: showPasswordField
+                    ? 'Неверный email или пароль'
+                    : 'Неверный email или пользователь не найден',
+                });
+                break;
+              default:
+                setError('');
+                break;
+            }
+          }
+        } finally {
+          setDisabled(false);
+        }
+      },
+    });
+    const onChangeHandle = (event: React.ChangeEvent) => {
+      formik.handleChange(event);
+      formik.setErrors({});
+      if (!showPasswordField && isMagicLinkSent) {
+        setIsMagicLinkSent(false);
+        setDisabled(false);
+      }
+    };
+
+    useEffect(() => {
+      // Если поле пароля скрыто, проверяем только email
+      if (!showPasswordField) {
+        setDisabled(formik.values.email.length === 0 || isMagicLinkSent);
+      }
+      // Если поле пароля показано, проверяем и email и пароль
+      else {
+        setDisabled(formik.values.email.length === 0 || formik.values.password.length === 0);
+      }
+    }, [formik.values.email, formik.values.password, showPasswordField, isMagicLinkSent]);
+
+    return (
+      <form
+        data-testid="sign-in-form"
+        className={cls.SignInForm}
+        noValidate
+        onSubmit={formik.handleSubmit}
+      >
+        <h3 className={`${cls.Title} title-3`}>Вход</h3>
+        <EmailField
+          name="email"
+          id="email"
+          value={formik.values.email}
+          onChange={onChangeHandle}
+          isError={!!formik.errors.email}
+          errorMessage={formik.errors.email}
+        />
+        {showPasswordField && (
+          <PasswordField
+            name="password"
+            id="password"
+            value={formik.values.password}
+            showPassword={showPassword}
+            setShowPassword={setShowPassword}
+            onChange={onChangeHandle}
+            errorMessage={formik.errors.password}
+            isError={!!formik.errors.password}
+          />
+        )}
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={disabled || (!showPasswordField && isMagicLinkSent)}
+          className={cls.Button}
+        >
+          {showPasswordField
+            ? 'Войти'
+            : isMagicLinkSent
+              ? 'Ссылка отправлена'
+              : 'Отправить волшебную ссылку'}
+        </Button>
+      </form>
+    );
+  },
+);
+
+export default SignInForm;
